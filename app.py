@@ -335,12 +335,12 @@ INDEX_COLORS = {
 }
 
 INDEX_DESCRIPTIONS = {
-    'NDVI': 'Normalized Difference Vegetation Index — measures green vegetation density and health. Values: -1 to 1 (>0.3 = healthy vegetation).',
-    'NDWI': 'Normalized Difference Water Index — detects surface water and moisture. Values: -1 to 1 (>0 = water presence).',
-    'EVI': 'Enhanced Vegetation Index — improved vegetation signal in high biomass areas with atmospheric correction. Values: -1 to 1.',
-    'SAVI': 'Soil-Adjusted Vegetation Index — reduces soil brightness influence on vegetation detection. Values: -1 to 1.',
-    'MNDWI': 'Modified NDWI — uses SWIR band for better urban water detection. Values: -1 to 1 (>0 = water).',
-    'BSI': 'Bare Soil Index — highlights bare soil and non-vegetated areas. Values: -1 to 1 (>0 = bare soil).',
+    'NDVI': 'Normalized Difference Vegetation Index - measures green vegetation density and health. Values: -1 to 1 (>0.3 = healthy vegetation).',
+    'NDWI': 'Normalized Difference Water Index - detects surface water and moisture. Values: -1 to 1 (>0 = water presence).',
+    'EVI': 'Enhanced Vegetation Index - improved vegetation signal in high biomass areas with atmospheric correction. Values: -1 to 1.',
+    'SAVI': 'Soil-Adjusted Vegetation Index - reduces soil brightness influence on vegetation detection. Values: -1 to 1.',
+    'MNDWI': 'Modified NDWI - uses SWIR band for better urban water detection. Values: -1 to 1 (>0 = water).',
+    'BSI': 'Bare Soil Index - highlights bare soil and non-vegetated areas. Values: -1 to 1 (>0 = bare soil).',
 }
 
 
@@ -723,6 +723,19 @@ if st.button("🔍 Analyze This Location", type="primary"):
 # PDF REPORT
 # ══════════════════════════════════════════════════════════════════════
 
+def pdf_safe(text):
+    """Sanitize text for FPDF latin-1 encoding."""
+    if not isinstance(text, str):
+        text = str(text)
+    replacements = {
+        '\u2014': '-', '\u2013': '-', '\u2018': "'", '\u2019': "'",
+        '\u201c': '"', '\u201d': '"', '\u2022': '*', '\u2026': '...',
+        '\u00b0': 'deg', '\u2019': "'", '\u00d7': 'x',
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text.encode('latin-1', errors='replace').decode('latin-1')
+
 class ReportPDF(FPDF):
     def header(self):
         if self.page_no() == 1: return
@@ -786,9 +799,9 @@ def generate_pdf_report(title, author, date_s, date_e, cloud, indices_list, anal
     ]:
         pdf.set_x(15)
         pdf.set_font("Arial", 'B', 10)
-        pdf.cell(80, 8, "  %s" % lbl, border=1, fill=True)
+        pdf.cell(80, 8, pdf_safe("  %s" % lbl), border=1, fill=True)
         pdf.set_font("Arial", size=10)
-        pdf.cell(100, 8, "  %s" % val, border=1, fill=True, ln=True)
+        pdf.cell(100, 8, pdf_safe("  %s" % val), border=1, fill=True, ln=True)
     pdf.ln(4)
 
     # Thumbnails on cover
@@ -848,7 +861,7 @@ def generate_pdf_report(title, author, date_s, date_e, cloud, indices_list, anal
     if analysis_list:
         for ar in analysis_list:
             pdf.add_page()
-            sec_head(pdf, ns(), "RESULTS: %s" % ar['label'])
+            sec_head(pdf, ns(), pdf_safe("RESULTS: %s" % ar['label']))
 
             for idx_name, stats in ar['stats'].items():
                 pdf.set_font("Arial", 'B', 11)
@@ -880,7 +893,7 @@ def generate_pdf_report(title, author, date_s, date_e, cloud, indices_list, anal
             pdf.set_font("Arial", 'B', 10)
             pdf.cell(0, 7, txt=idx_name, ln=True)
             pdf.set_font("Arial", size=9)
-            pdf.multi_cell(0, 5, txt=desc)
+            pdf.multi_cell(0, 5, txt=pdf_safe(desc))
             pdf.ln(2)
 
     # DISCLAIMER
@@ -891,9 +904,9 @@ def generate_pdf_report(title, author, date_s, date_e, cloud, indices_list, anal
     pdf.set_font("Arial", 'I', 8)
     pdf.set_text_color(120, 120, 120)
     pdf.multi_cell(0, 4,
-        txt="Disclaimer: Auto-generated using Sentinel-2 SR data via Google Earth Engine. "
+        txt=pdf_safe("Disclaimer: Auto-generated using Sentinel-2 SR data via Google Earth Engine. "
             "Cloud masking may not remove all cloud artifacts. Results should be validated "
-            "with field data for critical applications. Generated: %s." % datetime.now().strftime('%Y-%m-%d %H:%M')
+            "with field data for critical applications. Generated: %s." % datetime.now().strftime('%Y-%m-%d %H:%M'))
     )
 
     return bytes(pdf.output())
