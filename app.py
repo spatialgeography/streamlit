@@ -896,7 +896,7 @@ def generate_pdf_report(title, author, date_s, date_e, cloud, indices_list, anal
             "with field data for critical applications. Generated: %s." % datetime.now().strftime('%Y-%m-%d %H:%M')
     )
 
-    return pdf.output(dest='S').encode('latin-1')
+    return bytes(pdf.output())
 
 
 # SIDEBAR PDF BUTTON
