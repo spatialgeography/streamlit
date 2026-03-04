@@ -5,3 +5,4 @@ folium
 fpdf2
 plotly
 numpy
+google-generativeai
