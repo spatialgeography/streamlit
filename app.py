@@ -2884,5 +2884,3 @@ else:
         '</div>',
         unsafe_allow_html=True
     )
-
->>>>>>> ff1f7fca6b7217d0fd3cd1d6e027b9e2464c6a2c
