@@ -12,6 +12,13 @@ from datetime import datetime, timedelta
 import plotly.graph_objects as go
 import plotly.express as px
 import numpy as np
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
+import geedim
+import rasterio
+from io import BytesIO
 
 # ══════════════════════════════════════════════════════════════════════
 # PAGE CONFIG & AUTH
@@ -325,6 +332,115 @@ def get_index_thumbnail(geometry, index_name, start, end, cloud_max):
     return tmp.name
 
 
+def create_publication_map(geometry, index_name, start, end, cloud_max, title=None):
+    """Create a publication-quality map using Cartopy."""
+    collection = get_s2_collection(geometry, start, end, cloud_max)
+    if collection.size().getInfo() == 0:
+        return None
+
+    composite = collection.median()
+    index_img = compute_indices(composite)[index_name]
+
+    # Get data as a numpy array for plotting
+    # We use getThumbURL to get a visualization that we can then geo-reference with cartopy
+    # or better, use geedim to download a small chunk and plot
+    region = geometry.bounds().buffer(0.01).getInfo() # slightly larger
+    
+    palettes = {
+        'NDVI': {'min': -0.2, 'max': 0.8, 'palette': ['d73027', 'fc8d59', 'fee08b', 'd9ef8b', '91cf60', '1a9850']},
+        'NDWI': {'min': -0.5, 'max': 0.5, 'palette': ['d73027', 'fc8d59', 'fee08b', 'c6dbef', '6baed6', '2171b5']},
+        'EVI':  {'min': -0.2, 'max': 0.8, 'palette': ['d73027', 'fc8d59', 'fee08b', 'd9ef8b', '91cf60', '1a9850']},
+        'SAVI': {'min': -0.2, 'max': 0.8, 'palette': ['d73027', 'fc8d59', 'fee08b', 'd9ef8b', '91cf60', '1a9850']},
+        'MNDWI': {'min': -0.5, 'max': 0.5, 'palette': ['d73027', 'fc8d59', 'fee08b', 'c6dbef', '6baed6', '2171b5']},
+        'BSI':  {'min': -0.3, 'max': 0.3, 'palette': ['1a9850', '91cf60', 'fee08b', 'fc8d59', 'd73027', '8b0000']},
+    }
+    vis = palettes.get(index_name, {'min': -1, 'max': 1, 'palette': ['red', 'white', 'green']})
+    
+    # Use geedim to get a local image for plotting
+    try:
+        gd_image = geedim.schema.BaseImage(index_img)
+        # Download a low-res version for the plot
+        with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp_tif:
+            gd_image.download(tmp_tif.name, region=region, scale=50, crs='EPSG:4326')
+            
+            with rasterio.open(tmp_tif.name) as src:
+                data = src.read(1)
+                extent = [src.bounds.left, src.bounds.right, src.bounds.bottom, src.bounds.top]
+        
+        fig = plt.figure(figsize=(10, 8))
+        ax = plt.axes(projection=ccrs.PlateCarree())
+        
+        # Add features
+        ax.add_feature(cfeature.COASTLINE, linewidth=1)
+        ax.add_feature(cfeature.BORDERS, linestyle=':')
+        
+        # Plot data
+        # Use colormap corresponding to GEE palette if possible, or mapping
+        from matplotlib.colors import LinearSegmentedColormap
+        cmap = LinearSegmentedColormap.from_list('gee_p', ['#' + c for c in vis['palette']])
+        
+        im = ax.imshow(data, extent=extent, transform=ccrs.PlateCarree(),
+                       cmap=cmap, vmin=vis['min'], vmax=vis['max'], origin='upper')
+        
+        # Gridlines
+        gl = ax.gridlines(draw_labels=True, linewidth=1, color='gray', alpha=0.5, linestyle='--')
+        gl.top_labels = False
+        gl.right_labels = False
+        gl.xformatter = LONGITUDE_FORMATTER
+        gl.yformatter = LATITUDE_FORMATTER
+        
+        # Colorbar
+        cbar = plt.colorbar(im, ax=ax, orientation='vertical', pad=0.05, aspect=30)
+        cbar.set_label(index_name)
+        
+        # Title
+        if title:
+            plt.title(title, size=14, pad=20)
+        else:
+            plt.title(f"Publication Quality {index_name} Map", size=14, pad=20)
+            
+        # Save to bytes
+        buf = BytesIO()
+        plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        
+        # Cleanup
+        if os.path.exists(tmp_tif.name):
+            os.remove(tmp_tif.name)
+            
+        return buf.getvalue()
+    except Exception as e:
+        st.error(f"Error creating publication map: {e}")
+        return None
+
+
+def download_gee_tif(geometry, index_name, start, end, cloud_max):
+    """Download GeoTIFF using geedim, handles large areas with tiling."""
+    collection = get_s2_collection(geometry, start, end, cloud_max)
+    if collection.size().getInfo() == 0:
+        return None
+
+    composite = collection.median()
+    index_img = compute_indices(composite)[index_name]
+    
+    try:
+        gd_image = geedim.schema.BaseImage(index_img)
+        region = geometry.getInfo()
+        
+        with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
+            # geedim handles tiling automatically if needed
+            gd_image.download(tmp.name, region=region, scale=10, crs='EPSG:4326')
+            with open(tmp.name, 'rb') as f:
+                data = f.read()
+        
+        if os.path.exists(tmp.name):
+            os.remove(tmp.name)
+        return data
+    except Exception as e:
+        st.error(f"Error downloading GeoTIFF: {e}")
+        return None
+
+
 # ══════════════════════════════════════════════════════════════════════
 # CHART CREATION
 # ══════════════════════════════════════════════════════════════════════
@@ -477,6 +593,7 @@ def display_index_analysis(geom_info, area_label, selected_indices):
     tab_names = ["📊 Histograms", "📈 Time Series", "🔄 Index Comparison"]
     if 'NDVI' in all_stats:
         tab_names.append("🗺️ Land Cover")
+    tab_names.extend(["🗾 Publication Maps", "📥 Download Data"])
 
     tabs = st.tabs(tab_names)
 
@@ -542,6 +659,49 @@ def display_index_analysis(geom_info, area_label, selected_indices):
                         st.plotly_chart(fig, use_container_width=True)
                         lc_data = [{'Category': c, 'Percentage': '%.1f%%' % p} for c, p in zip(cats, pcts)]
                         st.dataframe(lc_data, use_container_width=True, hide_index=True)
+
+    # New Tab: Publication Maps
+    pub_tab_idx = 4 if 'NDVI' in all_stats else 3
+    with tabs[pub_tab_idx]:
+        st.markdown("### 🗾 Publication-Quality Cartographic Maps")
+        st.info("These maps are generated with Cartopy and include Latitude/Longitude gridlines and scale bars for publication use.")
+        
+        for idx_name in all_stats:
+            if st.button(f"Generate High-Quality {idx_name} Map", key=f"pub_map_{idx_name}_{area_label}"):
+                with st.spinner(f"Generating {idx_name} map with Cartopy..."):
+                    geom = ee.Geometry(json.loads(geom_info))
+                    pub_map_bytes = create_publication_map(
+                        geom, idx_name, str(date_start), str(date_end), cloud_pct,
+                        title=f"Sentinel-2 {idx_name} Index Map - {area_label}"
+                    )
+                    if pub_map_bytes:
+                        st.image(pub_map_bytes, caption=f"Publication Ready {idx_name} Map", use_container_width=True)
+                        st.download_button(
+                            label=f"📥 Download {idx_name} Map (PNG)",
+                            data=pub_map_bytes,
+                            file_name=f"{area_label}_{idx_name}_publication_map.png",
+                            mime="image/png"
+                        )
+
+    # New Tab: Download Data
+    dl_tab_idx = pub_tab_idx + 1
+    with tabs[dl_tab_idx]:
+        st.markdown("### 📥 Download Analysis Data")
+        st.info("Download the full resolution (10m) GeoTIFF for your study area. Large areas are automatically tiled and merged.")
+        
+        for idx_name in all_stats:
+            if st.button(f"Download {idx_name} GeoTIFF", key=f"dl_tif_{idx_name}_{area_label}"):
+                with st.spinner(f"Preparing GeoTIFF for {idx_name}..."):
+                    geom = ee.Geometry(json.loads(geom_info))
+                    tif_data = download_gee_tif(geom, idx_name, str(date_start), str(date_end), cloud_pct)
+                    if tif_data:
+                        st.success(f"✅ {idx_name} GeoTIFF ready!")
+                        st.download_button(
+                            label=f"💾 Save {idx_name} TIF",
+                            data=tif_data,
+                            file_name=f"{area_label}_{idx_name}.tif",
+                            mime="image/tiff"
+                        )
 
     return all_stats
 
@@ -915,23 +1075,41 @@ def generate_pdf_report(title, author, date_s, date_e, cloud, indices_list, anal
 # SIDEBAR PDF BUTTON
 st.sidebar.markdown("---")
 st.sidebar.subheader("📄 Generate Report")
-inc_thumbnails = st.sidebar.checkbox("Include map thumbnails", value=True)
+inc_thumbnails = st.sidebar.checkbox("Include basic thumbnails", value=False)
+inc_pub_maps = st.sidebar.checkbox("Include Publication-Quality maps", value=True)
 
 if st.sidebar.button("Generate PDF Report", type="primary"):
     with st.sidebar:
         analysis_data = st.session_state.get('drawn_analysis', [])
         thumbs = {}
 
-        if inc_thumbnails and analysis_data:
-            with st.spinner("Generating map thumbnails..."):
-                for idx_name in selected_indices[:2]:
-                    try:
-                        geom = ee.Geometry(json.loads(analysis_data[0]['geom_info']))
-                        thumbs[idx_name] = get_index_thumbnail(
-                            geom, idx_name, str(date_start), str(date_end), cloud_pct
-                        )
-                    except Exception:
-                        pass
+        if analysis_data:
+            geom = ee.Geometry(json.loads(analysis_data[0]['geom_info']))
+            
+            if inc_thumbnails:
+                with st.spinner("Generating basic thumbnails..."):
+                    for idx_name in selected_indices[:2]:
+                        try:
+                            thumbs[idx_name] = get_index_thumbnail(
+                                geom, idx_name, str(date_start), str(date_end), cloud_pct
+                            )
+                        except Exception:
+                            pass
+            
+            if inc_pub_maps:
+                with st.spinner("Generating publication quality maps..."):
+                    for idx_name in selected_indices[:2]:
+                        try:
+                            map_bytes = create_publication_map(
+                                geom, idx_name, str(date_start), str(date_end), cloud_pct
+                            )
+                            if map_bytes:
+                                tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                                tmp.write(map_bytes)
+                                tmp.close()
+                                thumbs[f"{idx_name} (Publication Quality)"] = tmp.name
+                        except Exception:
+                            pass
 
         with st.spinner("Generating PDF report..."):
             pdf_bytes = generate_pdf_report(
@@ -949,7 +1127,10 @@ if st.sidebar.button("Generate PDF Report", type="primary"):
 
         for p in thumbs.values():
             if p and os.path.exists(p):
-                os.unlink(p)
+                try:
+                    os.unlink(p)
+                except:
+                    pass
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🤖 Gemini AI Assistant")
