@@ -358,7 +358,7 @@ def create_publication_map(geometry, index_name, start, end, cloud_max, title=No
     
     # Use geedim to get a local image for plotting
     try:
-        gd_image = geedim.schema.BaseImage(index_img)
+        gd_image = geedim.MaskedImage(ee.Image(index_img))
         # Download a low-res version for the plot
         with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp_tif:
             gd_image.download(tmp_tif.name, region=region, scale=50, crs='EPSG:4326')
@@ -424,7 +424,7 @@ def download_gee_tif(geometry, index_name, start, end, cloud_max):
     index_img = compute_indices(composite)[index_name]
     
     try:
-        gd_image = geedim.schema.BaseImage(index_img)
+        gd_image = geedim.MaskedImage(ee.Image(index_img))
         region = geometry.getInfo()
         
         with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
