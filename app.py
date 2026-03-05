@@ -99,6 +99,32 @@ date_end = st.sidebar.date_input("End Date", value=today)
 cloud_pct = st.sidebar.slider("Max Cloud Cover (%)", 0, 100, 20)
 
 # Index selection
+st.sidebar.subheader("🌍 Administrative Regions")
+gaul_fc = ee.FeatureCollection("projects/sat-io/open-datasets/FAO/GAUL/GAUL_2024_L2")
+
+# We use a select box for Country and then District
+# To avoid slow loads, we can filter by some defaults or let user type
+country_search = st.sidebar.text_input("Search Country (GAUL)", value="India")
+dist_search = st.sidebar.text_input("Search District (GAUL)", value="")
+
+selected_district_geom = None
+if country_search:
+    countries = gaul_fc.filter(ee.Filter.stringContains('ADM0_NAME', country_search))
+    if countries.size().getInfo() > 0:
+        districts = countries.filter(ee.Filter.stringContains('ADM2_NAME', dist_search))
+        dist_names = districts.aggregate_array('ADM2_NAME').getInfo()
+        if dist_names:
+            selected_dist = st.sidebar.selectbox("Select District", options=sorted(list(set(dist_names))))
+            if st.sidebar.button("Add District to Analysis"):
+                dist_feat = districts.filter(ee.Filter.eq('ADM2_NAME', selected_dist)).first()
+                if 'dist_features' not in st.session_state:
+                    st.session_state.dist_features = []
+                st.session_state.dist_features.append({
+                    'label': f"District: {selected_dist}",
+                    'geometry': dist_feat.geometry().getInfo()
+                })
+                st.success(f"Added {selected_dist}!")
+
 st.sidebar.subheader("📊 Indices to Compute")
 calc_ndvi = st.sidebar.checkbox("NDVI (Vegetation)", value=True)
 calc_ndwi = st.sidebar.checkbox("NDWI (Water)", value=True)
@@ -106,6 +132,7 @@ calc_evi = st.sidebar.checkbox("EVI (Enhanced Vegetation)", value=True)
 calc_savi = st.sidebar.checkbox("SAVI (Soil-Adjusted Vegetation)", value=False)
 calc_mndwi = st.sidebar.checkbox("MNDWI (Modified Water)", value=False)
 calc_bsi = st.sidebar.checkbox("BSI (Bare Soil Index)", value=False)
+calc_precip = st.sidebar.checkbox("Precipitation (GPM Rainfall)", value=False)
 
 st.sidebar.subheader("✏️ Drawing Tools")
 st.sidebar.info("Draw on the map to define your study area. Stats will be computed for drawn regions.")
@@ -141,6 +168,17 @@ def get_s2_collection(geometry, start, end, cloud_max):
         .map(mask_s2_clouds)
     )
     return collection
+
+
+def get_gpm_precipitation(geometry, start, end):
+    """Get NASA GPM precipitation max composite."""
+    dataset = ee.ImageCollection('NASA/GPM_L3/IMERG_V07').filterDate(str(start), str(end))
+    if dataset.size().getInfo() == 0:
+        return None
+    precip = dataset.select('precipitation').max().clip(geometry)
+    # Mask out values <= 0.5 as requested
+    mask = precip.gt(0.5)
+    return precip.updateMask(mask).rename('Precipitation')
 
 
 def compute_indices(image):
@@ -185,26 +223,26 @@ def compute_indices(image):
 def compute_index_stats(_geom_info, index_image_id, index_name, start, end, cloud_max):
     """Compute statistics for a given index over a geometry."""
     geom = ee.Geometry(json.loads(_geom_info))
-    collection = get_s2_collection(geom, start, end, cloud_max)
-    count = collection.size().getInfo()
-
-    if count == 0:
-        return None, 0
-
-    composite = collection.median()
-    all_indices = compute_indices(composite)
-
-    if index_name not in all_indices:
-        return None, count
-
-    index_img = all_indices[index_name]
+    
+    if index_name == 'Precipitation':
+        index_img = get_gpm_precipitation(geom, start, end)
+        if index_img is None: return None, 0
+        count = 1
+    else:
+        collection = get_s2_collection(geom, start, end, cloud_max)
+        count = collection.size().getInfo()
+        if count == 0: return None, 0
+        composite = collection.median()
+        all_indices = compute_indices(composite)
+        if index_name not in all_indices: return None, count
+        index_img = all_indices[index_name]
 
     stats = index_img.reduceRegion(
         reducer=ee.Reducer.mean()
             .combine(reducer2=ee.Reducer.minMax(), sharedInputs=True)
             .combine(reducer2=ee.Reducer.stdDev(), sharedInputs=True)
             .combine(reducer2=ee.Reducer.percentile([10, 25, 50, 75, 90]), sharedInputs=True),
-        geometry=geom, scale=10, maxPixels=1e9
+        geometry=geom, scale=1000 if index_name == 'Precipitation' else 10, maxPixels=1e9
     ).getInfo()
 
     result = {}
@@ -218,23 +256,27 @@ def compute_index_stats(_geom_info, index_image_id, index_name, start, end, clou
 def compute_index_histogram(_geom_info, index_name, start, end, cloud_max, num_bins=50):
     """Compute histogram for an index."""
     geom = ee.Geometry(json.loads(_geom_info))
-    collection = get_s2_collection(geom, start, end, cloud_max)
-    if collection.size().getInfo() == 0:
-        return [], []
-
-    composite = collection.median()
-    index_img = compute_indices(composite)[index_name]
+    
+    if index_name == 'Precipitation':
+        index_img = get_gpm_precipitation(geom, start, end)
+        if index_img is None: return [], []
+    else:
+        collection = get_s2_collection(geom, start, end, cloud_max)
+        if collection.size().getInfo() == 0: return [], []
+        composite = collection.median()
+        index_img = compute_indices(composite)[index_name]
 
     # Index-specific ranges
     ranges = {
         'NDVI': (-0.5, 1.0), 'NDWI': (-1.0, 1.0), 'EVI': (-0.5, 1.0),
-        'SAVI': (-0.5, 1.0), 'MNDWI': (-1.0, 1.0), 'BSI': (-1.0, 1.0)
+        'SAVI': (-0.5, 1.0), 'MNDWI': (-1.0, 1.0), 'BSI': (-1.0, 1.0),
+        'Precipitation': (0, 100)
     }
     lo, hi = ranges.get(index_name, (-1, 1))
 
     hist = index_img.reduceRegion(
         reducer=ee.Reducer.fixedHistogram(lo, hi, num_bins),
-        geometry=geom, scale=10, maxPixels=1e9
+        geometry=geom, scale=1000 if index_name == 'Precipitation' else 10, maxPixels=1e9
     ).getInfo()
 
     buckets = hist.get(index_name, [])
@@ -254,15 +296,22 @@ def compute_time_series(_geom_info, index_name, start, end, cloud_max):
             m_end = '%04d-01-01' % (year + 1)
         else:
             m_end = '%04d-%02d-01' % (year, month + 1)
-        col = get_s2_collection(geom, m_start, m_end, cloud_max)
-        composite = col.median()
-        indices = compute_indices(composite)
-        if index_name not in indices:
+        
+        if index_name == 'Precipitation':
+            index_img = get_gpm_precipitation(geom, m_start, m_end)
+        else:
+            col = get_s2_collection(geom, m_start, m_end, cloud_max)
+            composite = col.median()
+            indices = compute_indices(composite)
+            index_img = indices.get(index_name)
+            
+        if index_img is None:
             return None
-        val = indices[index_name].reduceRegion(
+            
+        val = index_img.reduceRegion(
             reducer=ee.Reducer.mean(),
-            geometry=geom, scale=10, maxPixels=1e9
-        ).getInfo().get(index_name)
+            geometry=geom, scale=1000 if index_name == 'Precipitation' else 50, maxPixels=1e9
+        ).getInfo().get(index_name) # Added getInfo() to retrieve Python value
         return val
 
     # Generate monthly dates
@@ -290,9 +339,13 @@ def compute_time_series(_geom_info, index_name, start, end, cloud_max):
 
 def get_index_map_id(geometry, index_name, start, end, cloud_max):
     """Get EE map tile URL for an index layer."""
-    collection = get_s2_collection(geometry, start, end, cloud_max)
-    composite = collection.median()
-    index_img = compute_indices(composite)[index_name]
+    if index_name == 'Precipitation':
+        index_img = get_gpm_precipitation(geometry, start, end)
+        if index_img is None: return None, None
+    else:
+        collection = get_s2_collection(geometry, start, end, cloud_max)
+        composite = collection.median()
+        index_img = compute_indices(composite)[index_name]
 
     palettes = {
         'NDVI': {'min': -0.2, 'max': 0.8, 'palette': ['d73027', 'fc8d59', 'fee08b', 'd9ef8b', '91cf60', '1a9850']},
@@ -301,6 +354,7 @@ def get_index_map_id(geometry, index_name, start, end, cloud_max):
         'SAVI': {'min': -0.2, 'max': 0.8, 'palette': ['d73027', 'fc8d59', 'fee08b', 'd9ef8b', '91cf60', '1a9850']},
         'MNDWI': {'min': -0.5, 'max': 0.5, 'palette': ['d73027', 'fc8d59', 'fee08b', 'c6dbef', '6baed6', '2171b5']},
         'BSI':  {'min': -0.3, 'max': 0.3, 'palette': ['1a9850', '91cf60', 'fee08b', 'fc8d59', 'd73027', '8b0000']},
+        'Precipitation': {'min': 0, 'max': 50, 'palette': ['000096','0064ff', '00b4ff', '33db80', '9beb4a', 'ffeb00', 'ffb300', 'ff6400', 'eb1e00', 'af0000']}
     }
     vis = palettes.get(index_name, {'min': -1, 'max': 1, 'palette': ['red', 'white', 'green']})
     map_id = index_img.getMapId(vis)
@@ -309,9 +363,13 @@ def get_index_map_id(geometry, index_name, start, end, cloud_max):
 
 def get_index_thumbnail(geometry, index_name, start, end, cloud_max):
     """Get a static thumbnail PNG for an index."""
-    collection = get_s2_collection(geometry, start, end, cloud_max)
-    composite = collection.median()
-    index_img = compute_indices(composite)[index_name]
+    if index_name == 'Precipitation':
+        index_img = get_gpm_precipitation(geometry, start, end)
+        if index_img is None: return None
+    else:
+        collection = get_s2_collection(geometry, start, end, cloud_max)
+        composite = collection.median()
+        index_img = compute_indices(composite)[index_name]
 
     palettes = {
         'NDVI': {'min': -0.2, 'max': 0.8, 'palette': ['d73027', 'fc8d59', 'fee08b', 'd9ef8b', '91cf60', '1a9850']},
@@ -320,6 +378,7 @@ def get_index_thumbnail(geometry, index_name, start, end, cloud_max):
         'SAVI': {'min': -0.2, 'max': 0.8, 'palette': ['d73027', 'fc8d59', 'fee08b', 'd9ef8b', '91cf60', '1a9850']},
         'MNDWI': {'min': -0.5, 'max': 0.5, 'palette': ['d73027', 'fc8d59', 'fee08b', 'c6dbef', '6baed6', '2171b5']},
         'BSI':  {'min': -0.3, 'max': 0.3, 'palette': ['1a9850', '91cf60', 'fee08b', 'fc8d59', 'd73027', '8b0000']},
+        'Precipitation': {'min': 0, 'max': 50, 'palette': ['000096','0064ff', '00b4ff', '33db80', '9beb4a', 'ffeb00', 'ffb300', 'ff6400', 'eb1e00', 'af0000']}
     }
     vis = palettes.get(index_name, {'min': -1, 'max': 1, 'palette': ['red', 'white', 'green']})
 
@@ -334,16 +393,17 @@ def get_index_thumbnail(geometry, index_name, start, end, cloud_max):
 
 def create_publication_map(geometry, index_name, start, end, cloud_max, title=None):
     """Create a publication-quality map using Cartopy."""
-    collection = get_s2_collection(geometry, start, end, cloud_max)
-    if collection.size().getInfo() == 0:
-        return None
-
-    composite = collection.median()
-    index_img = compute_indices(composite)[index_name]
+    if index_name == 'Precipitation':
+        index_img = get_gpm_precipitation(geometry, start, end)
+        if index_img is None: return None
+    else:
+        collection = get_s2_collection(geometry, start, end, cloud_max)
+        if collection.size().getInfo() == 0:
+            return None
+        composite = collection.median()
+        index_img = compute_indices(composite)[index_name]
 
     # Get data as a numpy array for plotting
-    # We use getThumbURL to get a visualization that we can then geo-reference with cartopy
-    # or better, use geedim to download a small chunk and plot
     region = geometry.bounds().buffer(0.01).getInfo() # slightly larger
     
     palettes = {
@@ -353,6 +413,7 @@ def create_publication_map(geometry, index_name, start, end, cloud_max, title=No
         'SAVI': {'min': -0.2, 'max': 0.8, 'palette': ['d73027', 'fc8d59', 'fee08b', 'd9ef8b', '91cf60', '1a9850']},
         'MNDWI': {'min': -0.5, 'max': 0.5, 'palette': ['d73027', 'fc8d59', 'fee08b', 'c6dbef', '6baed6', '2171b5']},
         'BSI':  {'min': -0.3, 'max': 0.3, 'palette': ['1a9850', '91cf60', 'fee08b', 'fc8d59', 'd73027', '8b0000']},
+        'Precipitation': {'min': 0, 'max': 50, 'palette': ['000096','0064ff', '00b4ff', '33db80', '9beb4a', 'ffeb00', 'ffb300', 'ff6400', 'eb1e00', 'af0000']}
     }
     vis = palettes.get(index_name, {'min': -1, 'max': 1, 'palette': ['red', 'white', 'green']})
     
@@ -416,13 +477,18 @@ def create_publication_map(geometry, index_name, start, end, cloud_max, title=No
 
 def download_gee_tif(geometry, index_name, start, end, cloud_max):
     """Download GeoTIFF using geedim, handles large areas with tiling."""
-    collection = get_s2_collection(geometry, start, end, cloud_max)
-    if collection.size().getInfo() == 0:
-        return None
+    if index_name == 'Precipitation':
+        index_img = get_gpm_precipitation(geometry, start, end)
+        if index_img is None: return None
+        scale = 1000 # GPM is coarse
+    else:
+        collection = get_s2_collection(geometry, start, end, cloud_max)
+        if collection.size().getInfo() == 0:
+            return None
+        composite = collection.median()
+        index_img = compute_indices(composite)[index_name]
+        scale = 10
 
-    composite = collection.median()
-    index_img = compute_indices(composite)[index_name]
-    
     try:
         gd_image = geedim.MaskedImage(ee.Image(index_img))
         region = geometry.getInfo()
@@ -430,7 +496,7 @@ def download_gee_tif(geometry, index_name, start, end, cloud_max):
         tmp_path = tempfile.NamedTemporaryFile(suffix='.tif', delete=False).name
         
         # geedim handles tiling automatically if needed
-        gd_image.download(tmp_path, region=region, scale=10, crs='EPSG:4326', overwrite=True)
+        gd_image.download(tmp_path, region=region, scale=scale, crs='EPSG:4326', overwrite=True)
         with open(tmp_path, 'rb') as f:
             data = f.read()
         
@@ -449,6 +515,7 @@ def download_gee_tif(geometry, index_name, start, end, cloud_max):
 INDEX_COLORS = {
     'NDVI': '#1a9850', 'NDWI': '#2171b5', 'EVI': '#4daf4a',
     'SAVI': '#ff7f00', 'MNDWI': '#377eb8', 'BSI': '#a65628',
+    'Precipitation': '#000096',
 }
 
 INDEX_DESCRIPTIONS = {
@@ -458,6 +525,7 @@ INDEX_DESCRIPTIONS = {
     'SAVI': 'Soil-Adjusted Vegetation Index - reduces soil brightness influence on vegetation detection. Values: -1 to 1.',
     'MNDWI': 'Modified NDWI - uses SWIR band for better urban water detection. Values: -1 to 1 (>0 = water).',
     'BSI': 'Bare Soil Index - highlights bare soil and non-vegetated areas. Values: -1 to 1 (>0 = bare soil).',
+    'Precipitation': 'Monthly Maximum Precipitation - GPM IMERG Final Run V07. Values: mm/hr (values < 0.5 masked).',
 }
 
 
@@ -575,10 +643,12 @@ def display_index_analysis(geom_info, area_label, selected_indices):
             image_count = max(image_count, cnt)
 
     if not all_stats:
-        st.warning("No Sentinel-2 images found for this area and date range. Try expanding the date range or increasing cloud cover tolerance.")
+        st.warning("No imagery found for this area and date range. Try expanding the date range or increasing cloud cover tolerance.")
         return all_stats
 
-    st.info("📡 **%d Sentinel-2 images** found for the selected period" % image_count)
+    # Determine data source label
+    source_label = "Sentinel-2 & GPM" if 'Precipitation' in all_stats else "Sentinel-2"
+    st.info(f"📡 **Data sources ({source_label})** analyzed for the selected period")
 
     # Stats cards for each index
     for idx_name, stats in all_stats.items():
@@ -723,6 +793,7 @@ if calc_evi: selected_indices.append('EVI')
 if calc_savi: selected_indices.append('SAVI')
 if calc_mndwi: selected_indices.append('MNDWI')
 if calc_bsi: selected_indices.append('BSI')
+if calc_precip: selected_indices.append('Precipitation')
 
 if not selected_indices:
     st.warning("Please select at least one index from the sidebar.")
@@ -730,6 +801,18 @@ if not selected_indices:
 
 # Create map
 m = folium.Map(location=[DEFAULT_LAT, DEFAULT_LON], zoom_start=DEFAULT_ZOOM)
+
+# Add static districts if selected
+for dist in st.session_state.get('dist_features', []):
+    folium.GeoJson(
+        dist['geometry'],
+        name=dist['label'],
+        style_function=lambda x: {'color': '#ef4444', 'weight': 2, 'fillOpacity': 0.1}
+    ).add_to(m)
+    # Update default view to last added district
+    center = ee.Geometry(dist['geometry']).centroid().coordinates().getInfo()
+    m.location = [center[1], center[0]]
+    m.zoom_start = 10
 
 # Try to add index layers for default view area
 try:
@@ -780,6 +863,8 @@ def geojson_to_ee_geometry(feature):
         return ee.Geometry.Point(coords).buffer(point_buffer_m)
     elif geom_type == 'Polygon':
         return ee.Geometry.Polygon(coords)
+    elif geom_type == 'LineString':
+        return ee.Geometry.LineString(coords).buffer(point_buffer_m)
     return None
 
 
@@ -795,28 +880,36 @@ def get_feature_label(feature, index):
     return "Shape %d" % index
 
 
+# Persistence and Combination
 all_drawings = map_data.get('all_drawings', []) if map_data else []
-if 'drawn_features' not in st.session_state:
-    st.session_state.drawn_features = []
-if 'drawn_analysis' not in st.session_state:
-    st.session_state.drawn_analysis = []
-
-if all_drawings and len(all_drawings) > 0:
+if all_drawings:
     st.session_state.drawn_features = all_drawings
 
-st.markdown("---")
+# Combine drawn features and administrative districts
+combined_features = []
+for f in st.session_state.get('drawn_features', []):
+    combined_features.append({'feature': f, 'type': 'drawn'})
+for f in st.session_state.get('dist_features', []):
+    combined_features.append({'feature': f, 'type': 'district'})
 
-if len(st.session_state.drawn_features) > 0:
+if combined_features:
+    st.markdown("---")
     st.markdown("### 🔬 Study Area Analysis")
-    st.success("**%d study area(s)** defined — Analyzing with Sentinel-2 imagery..." % len(st.session_state.drawn_features))
+    st.success("**%d study area(s)** defined (Drawn & Districts) — Analyzing..." % len(combined_features))
 
     analysis_results = []
-    for idx, feature in enumerate(st.session_state.drawn_features, 1):
-        ee_geom = geojson_to_ee_geometry(feature)
+    for idx, item in enumerate(combined_features, 1):
+        feature = item['feature']
+        if item['type'] == 'drawn':
+            ee_geom = geojson_to_ee_geometry(feature)
+            label = get_feature_label(feature, idx)
+        else:
+            ee_geom = ee.Geometry(feature['geometry'])
+            label = feature['label']
+
         if ee_geom:
             try:
                 geom_info = json.dumps(ee_geom.getInfo())
-                label = get_feature_label(feature, idx)
                 st.markdown("## 📍 %s" % label)
                 stats = display_index_analysis(geom_info, label, selected_indices)
                 analysis_results.append({
