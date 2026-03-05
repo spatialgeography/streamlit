@@ -335,12 +335,12 @@ INDEX_COLORS = {
 }
 
 INDEX_DESCRIPTIONS = {
-    'NDVI': 'Normalized Difference Vegetation Index — measures green vegetation density and health. Values: -1 to 1 (>0.3 = healthy vegetation).',
-    'NDWI': 'Normalized Difference Water Index — detects surface water and moisture. Values: -1 to 1 (>0 = water presence).',
-    'EVI': 'Enhanced Vegetation Index — improved vegetation signal in high biomass areas with atmospheric correction. Values: -1 to 1.',
-    'SAVI': 'Soil-Adjusted Vegetation Index — reduces soil brightness influence on vegetation detection. Values: -1 to 1.',
-    'MNDWI': 'Modified NDWI — uses SWIR band for better urban water detection. Values: -1 to 1 (>0 = water).',
-    'BSI': 'Bare Soil Index — highlights bare soil and non-vegetated areas. Values: -1 to 1 (>0 = bare soil).',
+    'NDVI': 'Normalized Difference Vegetation Index - measures green vegetation density and health. Values: -1 to 1 (>0.3 = healthy vegetation).',
+    'NDWI': 'Normalized Difference Water Index - detects surface water and moisture. Values: -1 to 1 (>0 = water presence).',
+    'EVI': 'Enhanced Vegetation Index - improved vegetation signal in high biomass areas with atmospheric correction. Values: -1 to 1.',
+    'SAVI': 'Soil-Adjusted Vegetation Index - reduces soil brightness influence on vegetation detection. Values: -1 to 1.',
+    'MNDWI': 'Modified NDWI - uses SWIR band for better urban water detection. Values: -1 to 1 (>0 = water).',
+    'BSI': 'Bare Soil Index - highlights bare soil and non-vegetated areas. Values: -1 to 1 (>0 = bare soil).',
 }
 
 
@@ -723,6 +723,19 @@ if st.button("🔍 Analyze This Location", type="primary"):
 # PDF REPORT
 # ══════════════════════════════════════════════════════════════════════
 
+def pdf_safe(text):
+    """Sanitize text for FPDF latin-1 encoding."""
+    if not isinstance(text, str):
+        text = str(text)
+    replacements = {
+        '\u2014': '-', '\u2013': '-', '\u2018': "'", '\u2019': "'",
+        '\u201c': '"', '\u201d': '"', '\u2022': '*', '\u2026': '...',
+        '\u00b0': 'deg', '\u2019': "'", '\u00d7': 'x',
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text.encode('latin-1', errors='replace').decode('latin-1')
+
 class ReportPDF(FPDF):
     def header(self):
         if self.page_no() == 1: return
@@ -786,9 +799,9 @@ def generate_pdf_report(title, author, date_s, date_e, cloud, indices_list, anal
     ]:
         pdf.set_x(15)
         pdf.set_font("Arial", 'B', 10)
-        pdf.cell(80, 8, "  %s" % lbl, border=1, fill=True)
+        pdf.cell(80, 8, pdf_safe("  %s" % lbl), border=1, fill=True)
         pdf.set_font("Arial", size=10)
-        pdf.cell(100, 8, "  %s" % val, border=1, fill=True, ln=True)
+        pdf.cell(100, 8, pdf_safe("  %s" % val), border=1, fill=True, ln=True)
     pdf.ln(4)
 
     # Thumbnails on cover
@@ -848,7 +861,7 @@ def generate_pdf_report(title, author, date_s, date_e, cloud, indices_list, anal
     if analysis_list:
         for ar in analysis_list:
             pdf.add_page()
-            sec_head(pdf, ns(), "RESULTS: %s" % ar['label'])
+            sec_head(pdf, ns(), pdf_safe("RESULTS: %s" % ar['label']))
 
             for idx_name, stats in ar['stats'].items():
                 pdf.set_font("Arial", 'B', 11)
@@ -880,7 +893,7 @@ def generate_pdf_report(title, author, date_s, date_e, cloud, indices_list, anal
             pdf.set_font("Arial", 'B', 10)
             pdf.cell(0, 7, txt=idx_name, ln=True)
             pdf.set_font("Arial", size=9)
-            pdf.multi_cell(0, 5, txt=desc)
+            pdf.multi_cell(0, 5, txt=pdf_safe(desc))
             pdf.ln(2)
 
     # DISCLAIMER
@@ -891,12 +904,12 @@ def generate_pdf_report(title, author, date_s, date_e, cloud, indices_list, anal
     pdf.set_font("Arial", 'I', 8)
     pdf.set_text_color(120, 120, 120)
     pdf.multi_cell(0, 4,
-        txt="Disclaimer: Auto-generated using Sentinel-2 SR data via Google Earth Engine. "
+        txt=pdf_safe("Disclaimer: Auto-generated using Sentinel-2 SR data via Google Earth Engine. "
             "Cloud masking may not remove all cloud artifacts. Results should be validated "
-            "with field data for critical applications. Generated: %s." % datetime.now().strftime('%Y-%m-%d %H:%M')
+            "with field data for critical applications. Generated: %s." % datetime.now().strftime('%Y-%m-%d %H:%M'))
     )
 
-    return pdf.output(dest='S').encode('latin-1')
+    return bytes(pdf.output())
 
 
 # SIDEBAR PDF BUTTON
@@ -939,7 +952,209 @@ if st.sidebar.button("Generate PDF Report", type="primary"):
                 os.unlink(p)
 
 st.sidebar.markdown("---")
+st.sidebar.subheader("🤖 Gemini AI Assistant")
+gemini_key = st.sidebar.text_input("Gemini API Key", type="password", help="Get a free key at ai.google.dev")
 st.sidebar.markdown(
-    "<small style='color:#a7f3d0'>Sentinel-2 &bull; Earth Engine &bull; Folium &bull; Plotly</small>",
+    "<small style='color:#a7f3d0'>Sentinel-2 &bull; Earth Engine &bull; Folium &bull; Plotly &bull; Gemini AI</small>",
     unsafe_allow_html=True
 )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# GEMINI AI ASSISTANT
+# ══════════════════════════════════════════════════════════════════════
+
+def build_analysis_context():
+    """Build a text summary of all current analysis data for Gemini."""
+    ctx = []
+    ctx.append("=== SENTINEL-2 INDEX ANALYSIS SESSION ===")
+    ctx.append("Date Range: %s to %s" % (date_start, date_end))
+    ctx.append("Cloud Filter: <%d%%" % cloud_pct)
+    ctx.append("Selected Indices: %s" % ", ".join(selected_indices))
+    ctx.append("")
+
+    # Drawn area analysis
+    analysis_data = st.session_state.get('drawn_analysis', [])
+    if analysis_data:
+        ctx.append("=== ANALYSIS RESULTS (User-drawn study areas) ===")
+        for i, ar in enumerate(analysis_data, 1):
+            ctx.append("\n--- Study Area %d: %s ---" % (i, ar['label']))
+            for idx_name, stats in ar['stats'].items():
+                ctx.append("%s Statistics:" % idx_name)
+                for k, v in stats.items():
+                    ctx.append("  %s: %.4f" % (k, v))
+    else:
+        ctx.append("\nNo study areas drawn yet. The user has not drawn any areas to analyze.")
+
+    ctx.append("\n=== INDEX REFERENCE ===")
+    for name, desc in INDEX_DESCRIPTIONS.items():
+        if name in selected_indices:
+            ctx.append("%s: %s" % (name, desc))
+
+    ctx.append("\n=== INTERPRETATION RULES ===")
+    ctx.append("NDVI: <0 = water/cloud, 0-0.15 = bare soil, 0.15-0.3 = sparse vegetation, 0.3-0.5 = moderate, >0.5 = dense")
+    ctx.append("NDWI: >0 = water presence, <0 = non-water")
+    ctx.append("EVI: similar to NDVI but better for high biomass areas")
+    ctx.append("SAVI: like NDVI but corrected for soil brightness")
+    ctx.append("MNDWI: >0 = water bodies, better than NDWI in built-up areas")
+    ctx.append("BSI: >0 = bare soil, <0 = vegetated/water")
+    ctx.append("")
+    ctx.append("Satellite: Sentinel-2 SR Harmonized, 10m spatial resolution")
+    ctx.append("Region: User-defined study areas on interactive map")
+
+    return "\n".join(ctx)
+
+
+st.markdown("---")
+st.markdown("### 🤖 Gemini AI Analysis Assistant")
+
+if gemini_key:
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=gemini_key)
+        model = genai.GenerativeModel('gemini-2.0-flash')
+
+        st.markdown(
+            '<div style="background:linear-gradient(135deg,#eff6ff,#dbeafe);border:1px solid #93c5fd;'
+            'border-radius:12px;padding:16px;margin:8px 0;">'
+            '<p style="margin:0;color:#1e40af;">🤖 <strong>Gemini AI</strong> is connected! '
+            'Ask questions about your analysis data, request interpretations, '
+            'or ask for specific charts and comparisons.</p></div>',
+            unsafe_allow_html=True
+        )
+
+        # Initialize chat history
+        if 'chat_messages' not in st.session_state:
+            st.session_state.chat_messages = []
+
+        # Display chat history
+        for msg in st.session_state.chat_messages:
+            with st.chat_message(msg['role']):
+                st.markdown(msg['content'])
+
+        # Chat input
+        user_prompt = st.chat_input("Ask about your data... (e.g., 'Interpret my NDVI results' or 'What does my NDWI indicate?')")
+
+        if user_prompt:
+            # Show user message
+            st.session_state.chat_messages.append({'role': 'user', 'content': user_prompt})
+            with st.chat_message('user'):
+                st.markdown(user_prompt)
+
+            # Build context and query Gemini
+            analysis_context = build_analysis_context()
+
+            system_prompt = (
+                "You are a remote sensing and geospatial analysis expert embedded in a Streamlit web app. "
+                "You have access to Sentinel-2 satellite imagery analysis results. "
+                "The user has computed spectral indices (NDVI, NDWI, EVI, etc.) for their study areas. "
+                "Here is the current analysis data:\n\n"
+                "%s\n\n"
+                "INSTRUCTIONS:\n"
+                "1. When the user asks about their data, reference the ACTUAL statistics provided above.\n"
+                "2. Provide expert-level ecological, hydrological, or land-use interpretation.\n"
+                "3. If the user asks for charts, describe what the chart would show based on the data.\n"
+                "4. Be concise but scientifically accurate.\n"
+                "5. Suggest actionable insights (e.g., conservation priorities, flood risk, agricultural health).\n"
+                "6. If no study areas have been drawn, guide the user to draw on the map first.\n"
+                "7. Use markdown formatting for readability.\n"
+                "8. When comparing indices, explain what the combination reveals.\n"
+            ) % analysis_context
+
+            # Build conversation history for context
+            chat_history = []
+            for msg in st.session_state.chat_messages[:-1]:  # All except current
+                chat_history.append({
+                    'role': msg['role'] if msg['role'] == 'user' else 'model',
+                    'parts': [msg['content']]
+                })
+
+            with st.chat_message('assistant'):
+                with st.spinner("Analyzing with Gemini AI..."):
+                    try:
+                        chat = model.start_chat(history=chat_history)
+                        full_prompt = system_prompt + "\n\nUser question: " + user_prompt
+                        response = chat.send_message(full_prompt)
+                        ai_response = response.text
+
+                        st.markdown(ai_response)
+                        st.session_state.chat_messages.append({'role': 'assistant', 'content': ai_response})
+
+                    except Exception as e:
+                        error_msg = "Sorry, I encountered an error: %s" % str(e)
+                        st.error(error_msg)
+                        st.session_state.chat_messages.append({'role': 'assistant', 'content': error_msg})
+
+        # Quick action buttons
+        st.markdown("#### 💡 Quick Analysis Prompts")
+        qcol1, qcol2, qcol3 = st.columns(3)
+
+        analysis_data = st.session_state.get('drawn_analysis', [])
+        has_data = len(analysis_data) > 0
+
+        with qcol1:
+            if st.button("📊 Interpret my results", disabled=not has_data, key="qi_interpret"):
+                prompt = "Please provide a comprehensive interpretation of all my spectral index results. What do the values tell us about land cover, vegetation health, and water presence in my study area?"
+                st.session_state.chat_messages.append({'role': 'user', 'content': prompt})
+                st.rerun()
+
+        with qcol2:
+            if st.button("🌱 Vegetation health", disabled=not has_data, key="qi_veg"):
+                prompt = "Based on the NDVI and EVI values, assess the vegetation health in my study area. Is the vegetation healthy? Are there signs of stress? What recommendations would you make?"
+                st.session_state.chat_messages.append({'role': 'user', 'content': prompt})
+                st.rerun()
+
+        with qcol3:
+            if st.button("💧 Water analysis", disabled=not has_data, key="qi_water"):
+                prompt = "Analyze the water-related indices (NDWI, MNDWI) for my study area. Is there significant water presence? What does this mean for the area's hydrology and flood risk?"
+                st.session_state.chat_messages.append({'role': 'user', 'content': prompt})
+                st.rerun()
+
+        qcol4, qcol5, qcol6 = st.columns(3)
+
+        with qcol4:
+            if st.button("🏗️ Land use summary", disabled=not has_data, key="qi_landuse"):
+                prompt = "Based on all available indices, provide a land use / land cover summary for my study area. Estimate percentages of vegetation, water, bare soil, and built-up areas."
+                st.session_state.chat_messages.append({'role': 'user', 'content': prompt})
+                st.rerun()
+
+        with qcol5:
+            if st.button("📋 Recommendations", disabled=not has_data, key="qi_recs"):
+                prompt = "Based on the analysis results, what are your top 5 recommendations for environmental management, urban planning, or conservation in this area?"
+                st.session_state.chat_messages.append({'role': 'user', 'content': prompt})
+                st.rerun()
+
+        with qcol6:
+            if st.button("🔄 Compare indices", disabled=not has_data, key="qi_compare"):
+                prompt = "Compare all the computed indices for my study area. How do they relate to each other? What combined insights do NDVI + NDWI + other indices reveal that individual indices cannot?"
+                st.session_state.chat_messages.append({'role': 'user', 'content': prompt})
+                st.rerun()
+
+        # Clear chat button
+        if st.button("🗑️ Clear conversation", key="clear_chat"):
+            st.session_state.chat_messages = []
+            st.rerun()
+
+    except ImportError:
+        st.error("Google Generative AI package not installed. Add `google-generativeai` to requirements.txt.")
+    except Exception as e:
+        st.error("Gemini connection error: %s" % str(e))
+else:
+    st.markdown(
+        '<div style="background:linear-gradient(135deg,#fefce8,#fef9c3);border:1px solid #fde047;'
+        'border-radius:12px;padding:20px;margin:10px 0;">'
+        '<h4 style="margin:0 0 8px;color:#854d0e;">🤖 AI Assistant (Optional)</h4>'
+        '<p style="margin:0;color:#a16207;">Enter your <strong>Gemini API key</strong> in the sidebar to enable '
+        'AI-powered analysis. The assistant can:</p>'
+        '<ul style="color:#a16207;margin:8px 0;">'
+        '<li>Interpret your spectral index results</li>'
+        '<li>Assess vegetation health and water presence</li>'
+        '<li>Provide land use / land cover summaries</li>'
+        '<li>Suggest environmental management recommendations</li>'
+        '<li>Compare and correlate multiple indices</li>'
+        '</ul>'
+        '<p style="margin:4px 0 0;color:#a16207;">Get a free API key at '
+        '<a href="https://ai.google.dev" target="_blank" style="color:#854d0e;font-weight:bold;">ai.google.dev</a></p>'
+        '</div>',
+        unsafe_allow_html=True
+    )

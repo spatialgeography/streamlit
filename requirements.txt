@@ -2,6 +2,7 @@ streamlit
 streamlit-folium
 earthengine-api
 folium
-fpdf
+fpdf2
 plotly
 numpy
+google-generativeai
