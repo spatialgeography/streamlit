@@ -961,7 +961,7 @@ st.sidebar.markdown(
 
 
 # ══════════════════════════════════════════════════════════════════════
-# GEMINI AI ASSISTANT
+# GEMINI AI ASSISTANT — WITH LIVE ANALYSIS
 # ══════════════════════════════════════════════════════════════════════
 
 def build_analysis_context():
@@ -971,38 +971,117 @@ def build_analysis_context():
     ctx.append("Date Range: %s to %s" % (date_start, date_end))
     ctx.append("Cloud Filter: <%d%%" % cloud_pct)
     ctx.append("Selected Indices: %s" % ", ".join(selected_indices))
-    ctx.append("")
 
-    # Drawn area analysis
     analysis_data = st.session_state.get('drawn_analysis', [])
     if analysis_data:
-        ctx.append("=== ANALYSIS RESULTS (User-drawn study areas) ===")
+        ctx.append("\n=== ANALYSIS RESULTS ===")
         for i, ar in enumerate(analysis_data, 1):
             ctx.append("\n--- Study Area %d: %s ---" % (i, ar['label']))
             for idx_name, stats in ar['stats'].items():
-                ctx.append("%s Statistics:" % idx_name)
-                for k, v in stats.items():
-                    ctx.append("  %s: %.4f" % (k, v))
+                ctx.append("%s: %s" % (idx_name, str(stats)))
     else:
-        ctx.append("\nNo study areas drawn yet. The user has not drawn any areas to analyze.")
+        ctx.append("\nNo study areas drawn yet.")
 
     ctx.append("\n=== INDEX REFERENCE ===")
     for name, desc in INDEX_DESCRIPTIONS.items():
-        if name in selected_indices:
-            ctx.append("%s: %s" % (name, desc))
-
-    ctx.append("\n=== INTERPRETATION RULES ===")
-    ctx.append("NDVI: <0 = water/cloud, 0-0.15 = bare soil, 0.15-0.3 = sparse vegetation, 0.3-0.5 = moderate, >0.5 = dense")
-    ctx.append("NDWI: >0 = water presence, <0 = non-water")
-    ctx.append("EVI: similar to NDVI but better for high biomass areas")
-    ctx.append("SAVI: like NDVI but corrected for soil brightness")
-    ctx.append("MNDWI: >0 = water bodies, better than NDWI in built-up areas")
-    ctx.append("BSI: >0 = bare soil, <0 = vegetated/water")
-    ctx.append("")
-    ctx.append("Satellite: Sentinel-2 SR Harmonized, 10m spatial resolution")
-    ctx.append("Region: User-defined study areas on interactive map")
+        ctx.append("%s: %s" % (name, desc))
 
     return "\n".join(ctx)
+
+
+def execute_ai_analysis(lat, lon, buffer_m, indices_to_compute):
+    """Run actual EE analysis for a location."""
+    geom = ee.Geometry.Point(lon, lat).buffer(buffer_m)
+    geom_info = json.dumps(geom.getInfo())
+
+    results = {}
+    for idx_name in indices_to_compute:
+        stats, count = compute_index_stats(
+            geom_info, idx_name, idx_name,
+            str(date_start), str(date_end), cloud_pct
+        )
+        if stats:
+            results[idx_name] = stats
+
+    return results, geom_info, count
+
+
+def parse_coordinates(text):
+    """Try to extract lat, lon, buffer from user text."""
+    import re
+    # patterns: "20.5, 85.8" or "lat 20.5 lon 85.8" or "20.5N 85.8E"
+    coords = re.findall(r'[-+]?\d+\.?\d*', text)
+    lat, lon, buf = None, None, 1000
+
+    # Look for lat/lon pairs
+    nums = [float(x) for x in coords]
+    if len(nums) >= 2:
+        # Heuristic: if a number is between -90..90, likely lat; 
+        # if between -180..180, likely lon
+        candidates = []
+        for n in nums:
+            if -90 <= n <= 90:
+                candidates.append(('lat', n))
+            elif -180 <= n <= 180:
+                candidates.append(('lon', n))
+            elif 100 <= n <= 50000:
+                buf = int(n)
+
+        if len(candidates) >= 2:
+            lat = candidates[0][1]
+            lon = candidates[1][1]
+        elif len(nums) >= 2:
+            lat = nums[0]
+            lon = nums[1]
+
+        if len(nums) >= 3 and buf == 1000:
+            third = nums[2]
+            if 100 <= third <= 50000:
+                buf = int(third)
+
+    return lat, lon, buf
+
+
+def detect_action(text):
+    """Detect if user wants a specific action performed."""
+    text_lower = text.lower()
+
+    # Compute/analyze at location
+    if any(kw in text_lower for kw in ['compute', 'analyze', 'calculate', 'check', 'scan', 'run analysis']):
+        lat, lon, buf = parse_coordinates(text)
+        if lat is not None and lon is not None:
+            indices = []
+            for idx in ['NDVI', 'NDWI', 'EVI', 'SAVI', 'MNDWI', 'BSI']:
+                if idx.lower() in text_lower:
+                    indices.append(idx)
+            if not indices:
+                indices = selected_indices  # Use sidebar selection
+            return {'action': 'compute', 'lat': lat, 'lon': lon,
+                    'buffer': buf, 'indices': indices}
+
+    # Histogram request
+    if any(kw in text_lower for kw in ['histogram', 'distribution', 'frequency']):
+        for idx in ['NDVI', 'NDWI', 'EVI', 'SAVI', 'MNDWI', 'BSI']:
+            if idx.lower() in text_lower:
+                return {'action': 'histogram', 'index': idx}
+        return {'action': 'histogram', 'index': selected_indices[0]}
+
+    # Time series request
+    if any(kw in text_lower for kw in ['time series', 'trend', 'temporal', 'monthly']):
+        for idx in ['NDVI', 'NDWI', 'EVI', 'SAVI', 'MNDWI', 'BSI']:
+            if idx.lower() in text_lower:
+                return {'action': 'timeseries', 'index': idx}
+        return {'action': 'timeseries', 'index': selected_indices[0]}
+
+    # Comparison
+    if any(kw in text_lower for kw in ['compare', 'comparison', 'bar chart', 'side by side']):
+        return {'action': 'compare'}
+
+    # Land cover
+    if any(kw in text_lower for kw in ['land cover', 'land use', 'classify', 'classification']):
+        return {'action': 'landcover'}
+
+    return None
 
 
 st.markdown("---")
@@ -1017,143 +1096,346 @@ if gemini_key:
         st.markdown(
             '<div style="background:linear-gradient(135deg,#eff6ff,#dbeafe);border:1px solid #93c5fd;'
             'border-radius:12px;padding:16px;margin:8px 0;">'
-            '<p style="margin:0;color:#1e40af;">🤖 <strong>Gemini AI</strong> is connected! '
-            'Ask questions about your analysis data, request interpretations, '
-            'or ask for specific charts and comparisons.</p></div>',
+            '<p style="margin:0;color:#1e40af;">🤖 <strong>Gemini AI</strong> is connected and can <strong>perform live analysis!</strong> '
+            'Try: "Compute NDVI for 20.46, 85.88" or "Show NDVI histogram" or "Analyze 20.30, 85.82 with 2000m buffer"</p></div>',
             unsafe_allow_html=True
         )
 
-        # Initialize chat history
         if 'chat_messages' not in st.session_state:
             st.session_state.chat_messages = []
 
-        # Display chat history
         for msg in st.session_state.chat_messages:
             with st.chat_message(msg['role']):
                 st.markdown(msg['content'])
+                # Re-render charts from history
+                if 'chart' in msg:
+                    st.plotly_chart(msg['chart'], use_container_width=True)
+                if 'metrics' in msg:
+                    cols = st.columns(len(msg['metrics']))
+                    for i, (k, v) in enumerate(msg['metrics'].items()):
+                        cols[i].metric(k, v)
 
-        # Chat input
-        user_prompt = st.chat_input("Ask about your data... (e.g., 'Interpret my NDVI results' or 'What does my NDWI indicate?')")
+        user_prompt = st.chat_input(
+            "Try: 'Compute NDVI for 20.46, 85.88' or 'Show histogram' or 'Analyze vegetation at 20.3, 85.8'"
+        )
 
         if user_prompt:
-            # Show user message
             st.session_state.chat_messages.append({'role': 'user', 'content': user_prompt})
             with st.chat_message('user'):
                 st.markdown(user_prompt)
 
-            # Build context and query Gemini
-            analysis_context = build_analysis_context()
-
-            system_prompt = (
-                "You are a remote sensing and geospatial analysis expert embedded in a Streamlit web app. "
-                "You have access to Sentinel-2 satellite imagery analysis results. "
-                "The user has computed spectral indices (NDVI, NDWI, EVI, etc.) for their study areas. "
-                "Here is the current analysis data:\n\n"
-                "%s\n\n"
-                "INSTRUCTIONS:\n"
-                "1. When the user asks about their data, reference the ACTUAL statistics provided above.\n"
-                "2. Provide expert-level ecological, hydrological, or land-use interpretation.\n"
-                "3. If the user asks for charts, describe what the chart would show based on the data.\n"
-                "4. Be concise but scientifically accurate.\n"
-                "5. Suggest actionable insights (e.g., conservation priorities, flood risk, agricultural health).\n"
-                "6. If no study areas have been drawn, guide the user to draw on the map first.\n"
-                "7. Use markdown formatting for readability.\n"
-                "8. When comparing indices, explain what the combination reveals.\n"
-            ) % analysis_context
-
-            # Build conversation history for context
-            chat_history = []
-            for msg in st.session_state.chat_messages[:-1]:  # All except current
-                chat_history.append({
-                    'role': msg['role'] if msg['role'] == 'user' else 'model',
-                    'parts': [msg['content']]
-                })
+            # Detect if user wants a live action
+            action = detect_action(user_prompt)
 
             with st.chat_message('assistant'):
-                with st.spinner("Analyzing with Gemini AI..."):
-                    try:
-                        chat = model.start_chat(history=chat_history)
-                        full_prompt = system_prompt + "\n\nUser question: " + user_prompt
-                        response = chat.send_message(full_prompt)
-                        ai_response = response.text
+                # === ACTION: COMPUTE STATS AT LOCATION ===
+                if action and action['action'] == 'compute':
+                    lat, lon, buf = action['lat'], action['lon'], action['buffer']
+                    indices = action['indices']
+                    st.markdown("**🔄 Running live analysis at (%.4f, %.4f) with %dm buffer...**" % (lat, lon, buf))
+                    st.markdown("Indices: %s | Period: %s to %s" % (", ".join(indices), date_start, date_end))
 
-                        st.markdown(ai_response)
-                        st.session_state.chat_messages.append({'role': 'assistant', 'content': ai_response})
+                    with st.spinner("Querying Google Earth Engine..."):
+                        try:
+                            results, geom_info, img_count = execute_ai_analysis(
+                                lat, lon, buf, indices
+                            )
 
-                    except Exception as e:
-                        error_msg = "Sorry, I encountered an error: %s" % str(e)
-                        st.error(error_msg)
-                        st.session_state.chat_messages.append({'role': 'assistant', 'content': error_msg})
+                            if results:
+                                st.success("✅ Found **%d Sentinel-2 images** — Analysis complete!" % img_count)
+
+                                msg_parts = ["**📍 Analysis Results for (%.4f, %.4f) — %dm buffer**\n" % (lat, lon, buf)]
+                                msg_parts.append("**%d images** | Period: %s to %s\n" % (img_count, date_start, date_end))
+
+                                for idx_name, stats in results.items():
+                                    st.markdown("**%s Results:**" % idx_name)
+                                    metric_cols = st.columns(5)
+                                    metric_cols[0].metric("Mean", "%.4f" % stats.get('mean', 0))
+                                    metric_cols[1].metric("Min", "%.4f" % stats.get('min', 0))
+                                    metric_cols[2].metric("Max", "%.4f" % stats.get('max', 0))
+                                    metric_cols[3].metric("Std Dev", "%.4f" % stats.get('stdDev', 0))
+                                    metric_cols[4].metric("Median", "%.4f" % stats.get('p50', 0))
+
+                                    msg_parts.append("\n**%s:** Mean=%.4f, Min=%.4f, Max=%.4f, StdDev=%.4f" % (
+                                        idx_name, stats.get('mean', 0), stats.get('min', 0),
+                                        stats.get('max', 0), stats.get('stdDev', 0)
+                                    ))
+
+                                # Generate comparison chart if multiple indices
+                                if len(results) >= 2:
+                                    fig = create_comparison_bar(results)
+                                    st.plotly_chart(fig, use_container_width=True)
+
+                                # Ask Gemini to interpret the results
+                                interp_prompt = (
+                                    "You are a remote sensing expert. The user just computed these indices at "
+                                    "(%.4f, %.4f) with %dm buffer:\n%s\n\n"
+                                    "Provide a brief (3-4 sentences) expert interpretation. "
+                                    "What does this tell us about the land cover and environment?" % (
+                                        lat, lon, buf, str(results)
+                                    )
+                                )
+                                interp_resp = model.generate_content(interp_prompt)
+                                st.markdown("---")
+                                st.markdown("**🧠 AI Interpretation:**")
+                                st.markdown(interp_resp.text)
+                                msg_parts.append("\n\n**AI Interpretation:**\n" + interp_resp.text)
+
+                                st.session_state.chat_messages.append({
+                                    'role': 'assistant',
+                                    'content': "\n".join(msg_parts)
+                                })
+                            else:
+                                msg = "⚠️ No Sentinel-2 images found for this location. Try a different date range or increase cloud cover tolerance."
+                                st.warning(msg)
+                                st.session_state.chat_messages.append({'role': 'assistant', 'content': msg})
+
+                        except Exception as e:
+                            msg = "❌ Analysis error: %s" % str(e)
+                            st.error(msg)
+                            st.session_state.chat_messages.append({'role': 'assistant', 'content': msg})
+
+                # === ACTION: HISTOGRAM ===
+                elif action and action['action'] == 'histogram':
+                    idx_name = action['index']
+                    analysis_data = st.session_state.get('drawn_analysis', [])
+
+                    if analysis_data:
+                        geom_info = analysis_data[0]['geom_info']
+                        st.markdown("**📊 Computing %s histogram for your study area...**" % idx_name)
+
+                        with st.spinner("Computing histogram..."):
+                            try:
+                                bins, counts = compute_index_histogram(
+                                    geom_info, idx_name,
+                                    str(date_start), str(date_end), cloud_pct
+                                )
+                                if bins:
+                                    fig = create_index_histogram(bins, counts, idx_name)
+                                    st.plotly_chart(fig, use_container_width=True)
+
+                                    # AI interpretation
+                                    peak_bin = bins[counts.index(max(counts))]
+                                    interp = model.generate_content(
+                                        "Remote sensing expert: The %s histogram for this area shows "
+                                        "peak values around %.3f. Total pixels: %d. "
+                                        "Give a 2-sentence interpretation." % (
+                                            idx_name, peak_bin, sum(counts))
+                                    )
+                                    st.markdown(interp.text)
+                                    st.session_state.chat_messages.append({
+                                        'role': 'assistant',
+                                        'content': "Generated %s histogram. %s" % (idx_name, interp.text)
+                                    })
+                            except Exception as e:
+                                st.error("Histogram error: %s" % str(e))
+                    else:
+                        st.info("Draw a study area on the map first, then ask for a histogram.")
+                        st.session_state.chat_messages.append({
+                            'role': 'assistant',
+                            'content': "Please draw a study area on the map first, then I can generate histograms."
+                        })
+
+                # === ACTION: TIME SERIES ===
+                elif action and action['action'] == 'timeseries':
+                    idx_name = action['index']
+                    analysis_data = st.session_state.get('drawn_analysis', [])
+
+                    if analysis_data:
+                        geom_info = analysis_data[0]['geom_info']
+                        st.markdown("**📈 Computing %s time series...**" % idx_name)
+
+                        with st.spinner("Computing monthly %s (this may take a moment)..." % idx_name):
+                            try:
+                                dates, values = compute_time_series(
+                                    geom_info, idx_name,
+                                    str(date_start), str(date_end), cloud_pct
+                                )
+                                if dates:
+                                    fig = create_time_series_chart(dates, values, idx_name)
+                                    st.plotly_chart(fig, use_container_width=True)
+
+                                    valid_vals = [v for v in values if v is not None]
+                                    if valid_vals:
+                                        trend = "increasing" if valid_vals[-1] > valid_vals[0] else "decreasing"
+                                        interp = model.generate_content(
+                                            "The %s time series from %s to %s shows values: %s. "
+                                            "Overall trend: %s. Range: %.4f to %.4f. "
+                                            "Give a 3-sentence expert interpretation about vegetation/water dynamics." % (
+                                                idx_name, date_start, date_end,
+                                                str(valid_vals[:6]), trend,
+                                                min(valid_vals), max(valid_vals)
+                                            )
+                                        )
+                                        st.markdown(interp.text)
+                                        st.session_state.chat_messages.append({
+                                            'role': 'assistant',
+                                            'content': "Generated %s time series. %s" % (idx_name, interp.text)
+                                        })
+                            except Exception as e:
+                                st.error("Time series error: %s" % str(e))
+                    else:
+                        st.info("Draw a study area on the map first.")
+                        st.session_state.chat_messages.append({
+                            'role': 'assistant',
+                            'content': "Please draw a study area on the map first."
+                        })
+
+                # === ACTION: LAND COVER ===
+                elif action and action['action'] == 'landcover':
+                    analysis_data = st.session_state.get('drawn_analysis', [])
+                    if analysis_data:
+                        geom_info = analysis_data[0]['geom_info']
+                        st.markdown("**🗺️ Computing land cover classification...**")
+
+                        with st.spinner("Classifying land cover from NDVI..."):
+                            try:
+                                bins, counts = compute_index_histogram(
+                                    geom_info, 'NDVI',
+                                    str(date_start), str(date_end), cloud_pct
+                                )
+                                if bins:
+                                    result = create_land_cover_pie(bins, counts)
+                                    if result:
+                                        fig, cats, pcts = result
+                                        st.plotly_chart(fig, use_container_width=True)
+
+                                        lc_summary = ", ".join(["%s: %.1f%%" % (c, p) for c, p in zip(cats, pcts)])
+                                        interp = model.generate_content(
+                                            "Land cover classification from NDVI for this area: %s. "
+                                            "Provide a 3-sentence expert interpretation about land use." % lc_summary
+                                        )
+                                        st.markdown(interp.text)
+                                        st.session_state.chat_messages.append({
+                                            'role': 'assistant',
+                                            'content': "Land Cover: %s\n\n%s" % (lc_summary, interp.text)
+                                        })
+                            except Exception as e:
+                                st.error("Land cover error: %s" % str(e))
+                    else:
+                        st.info("Draw a study area on the map first.")
+                        st.session_state.chat_messages.append({
+                            'role': 'assistant', 'content': "Please draw a study area first."
+                        })
+
+                # === ACTION: COMPARE ===
+                elif action and action['action'] == 'compare':
+                    analysis_data = st.session_state.get('drawn_analysis', [])
+                    if analysis_data and analysis_data[0]['stats']:
+                        stats = analysis_data[0]['stats']
+                        if len(stats) >= 2:
+                            fig = create_comparison_bar(stats)
+                            st.plotly_chart(fig, use_container_width=True)
+
+                            interp = model.generate_content(
+                                "Compare these index values for a study area: %s. "
+                                "What does the combination of these indices reveal?" % str(stats)
+                            )
+                            st.markdown(interp.text)
+                            st.session_state.chat_messages.append({
+                                'role': 'assistant', 'content': interp.text
+                            })
+                        else:
+                            st.info("Select at least 2 indices in the sidebar.")
+                    else:
+                        st.info("Draw a study area and compute indices first.")
+                        st.session_state.chat_messages.append({
+                            'role': 'assistant', 'content': "Please draw a study area first."
+                        })
+
+                # === NO ACTION — PURE AI CHAT ===
+                else:
+                    analysis_context = build_analysis_context()
+                    system_prompt = (
+                        "You are a remote sensing expert in a Sentinel-2 analysis app. "
+                        "You can interpret data AND tell users to use these commands:\n"
+                        "- 'Compute NDVI for <lat>, <lon>' to run live analysis\n"
+                        "- 'Show NDVI histogram' to generate distribution chart\n"
+                        "- 'Show NDVI time series' for monthly trends\n"
+                        "- 'Land cover classification' for NDVI-based land use\n"
+                        "- 'Compare indices' for bar chart comparison\n\n"
+                        "Current data:\n%s\n\n"
+                        "Answer the user's question. If they want analysis, suggest the right command.\n"
+                    ) % analysis_context
+
+                    chat_history = []
+                    for msg in st.session_state.chat_messages[:-1]:
+                        chat_history.append({
+                            'role': msg['role'] if msg['role'] == 'user' else 'model',
+                            'parts': [msg['content']]
+                        })
+
+                    with st.spinner("Thinking..."):
+                        try:
+                            chat = model.start_chat(history=chat_history)
+                            response = chat.send_message(system_prompt + "\nUser: " + user_prompt)
+                            st.markdown(response.text)
+                            st.session_state.chat_messages.append({
+                                'role': 'assistant', 'content': response.text
+                            })
+                        except Exception as e:
+                            st.error("Error: %s" % str(e))
 
         # Quick action buttons
-        st.markdown("#### 💡 Quick Analysis Prompts")
-        qcol1, qcol2, qcol3 = st.columns(3)
-
+        st.markdown("#### ⚡ Quick Actions")
         analysis_data = st.session_state.get('drawn_analysis', [])
         has_data = len(analysis_data) > 0
 
-        with qcol1:
-            if st.button("📊 Interpret my results", disabled=not has_data, key="qi_interpret"):
-                prompt = "Please provide a comprehensive interpretation of all my spectral index results. What do the values tell us about land cover, vegetation health, and water presence in my study area?"
-                st.session_state.chat_messages.append({'role': 'user', 'content': prompt})
+        qr1, qr2, qr3, qr4 = st.columns(4)
+        with qr1:
+            if st.button("📊 NDVI Histogram", disabled=not has_data, key="qa_hist"):
+                st.session_state.chat_messages.append({'role': 'user', 'content': 'Show NDVI histogram'})
+                st.rerun()
+        with qr2:
+            if st.button("📈 NDVI Trend", disabled=not has_data, key="qa_trend"):
+                st.session_state.chat_messages.append({'role': 'user', 'content': 'Show NDVI time series'})
+                st.rerun()
+        with qr3:
+            if st.button("🗺️ Land Cover", disabled=not has_data, key="qa_lc"):
+                st.session_state.chat_messages.append({'role': 'user', 'content': 'land cover classification'})
+                st.rerun()
+        with qr4:
+            if st.button("🔄 Compare All", disabled=not has_data, key="qa_comp"):
+                st.session_state.chat_messages.append({'role': 'user', 'content': 'compare indices'})
                 st.rerun()
 
-        with qcol2:
-            if st.button("🌱 Vegetation health", disabled=not has_data, key="qi_veg"):
-                prompt = "Based on the NDVI and EVI values, assess the vegetation health in my study area. Is the vegetation healthy? Are there signs of stress? What recommendations would you make?"
-                st.session_state.chat_messages.append({'role': 'user', 'content': prompt})
+        qr5, qr6, qr7, qr8 = st.columns(4)
+        with qr5:
+            if st.button("🌱 Interpret Results", disabled=not has_data, key="qa_interp"):
+                st.session_state.chat_messages.append({'role': 'user', 'content': 'Interpret all my spectral index results comprehensively'})
                 st.rerun()
-
-        with qcol3:
-            if st.button("💧 Water analysis", disabled=not has_data, key="qi_water"):
-                prompt = "Analyze the water-related indices (NDWI, MNDWI) for my study area. Is there significant water presence? What does this mean for the area's hydrology and flood risk?"
-                st.session_state.chat_messages.append({'role': 'user', 'content': prompt})
+        with qr6:
+            if st.button("💧 Water Analysis", disabled=not has_data, key="qa_water"):
+                st.session_state.chat_messages.append({'role': 'user', 'content': 'Analyze water indices NDWI and MNDWI for flood risk'})
                 st.rerun()
-
-        qcol4, qcol5, qcol6 = st.columns(3)
-
-        with qcol4:
-            if st.button("🏗️ Land use summary", disabled=not has_data, key="qi_landuse"):
-                prompt = "Based on all available indices, provide a land use / land cover summary for my study area. Estimate percentages of vegetation, water, bare soil, and built-up areas."
-                st.session_state.chat_messages.append({'role': 'user', 'content': prompt})
+        with qr7:
+            if st.button("📋 Recommendations", disabled=not has_data, key="qa_recs"):
+                st.session_state.chat_messages.append({'role': 'user', 'content': 'Give 5 environmental management recommendations based on my analysis'})
                 st.rerun()
-
-        with qcol5:
-            if st.button("📋 Recommendations", disabled=not has_data, key="qi_recs"):
-                prompt = "Based on the analysis results, what are your top 5 recommendations for environmental management, urban planning, or conservation in this area?"
-                st.session_state.chat_messages.append({'role': 'user', 'content': prompt})
+        with qr8:
+            if st.button("🗑️ Clear Chat", key="clear_chat"):
+                st.session_state.chat_messages = []
                 st.rerun()
-
-        with qcol6:
-            if st.button("🔄 Compare indices", disabled=not has_data, key="qi_compare"):
-                prompt = "Compare all the computed indices for my study area. How do they relate to each other? What combined insights do NDVI + NDWI + other indices reveal that individual indices cannot?"
-                st.session_state.chat_messages.append({'role': 'user', 'content': prompt})
-                st.rerun()
-
-        # Clear chat button
-        if st.button("🗑️ Clear conversation", key="clear_chat"):
-            st.session_state.chat_messages = []
-            st.rerun()
 
     except ImportError:
-        st.error("Google Generative AI package not installed. Add `google-generativeai` to requirements.txt.")
+        st.error("Install `google-generativeai` — add it to requirements.txt.")
     except Exception as e:
-        st.error("Gemini connection error: %s" % str(e))
+        st.error("Gemini error: %s" % str(e))
 else:
     st.markdown(
         '<div style="background:linear-gradient(135deg,#fefce8,#fef9c3);border:1px solid #fde047;'
         'border-radius:12px;padding:20px;margin:10px 0;">'
         '<h4 style="margin:0 0 8px;color:#854d0e;">🤖 AI Assistant (Optional)</h4>'
-        '<p style="margin:0;color:#a16207;">Enter your <strong>Gemini API key</strong> in the sidebar to enable '
-        'AI-powered analysis. The assistant can:</p>'
+        '<p style="margin:0;color:#a16207;">Enter your <strong>Gemini API key</strong> in the sidebar. '
+        'The AI can <strong>perform live analysis</strong> via chat:</p>'
         '<ul style="color:#a16207;margin:8px 0;">'
-        '<li>Interpret your spectral index results</li>'
-        '<li>Assess vegetation health and water presence</li>'
-        '<li>Provide land use / land cover summaries</li>'
-        '<li>Suggest environmental management recommendations</li>'
-        '<li>Compare and correlate multiple indices</li>'
+        '<li><strong>"Compute NDVI for 20.46, 85.88"</strong> - runs real EE analysis</li>'
+        '<li><strong>"Show NDVI histogram"</strong> - generates distribution chart</li>'
+        '<li><strong>"Show NDVI time series"</strong> - monthly trend analysis</li>'
+        '<li><strong>"Land cover classification"</strong> - NDVI-based land use</li>'
+        '<li><strong>"Compare indices"</strong> - bar chart comparison</li>'
         '</ul>'
-        '<p style="margin:4px 0 0;color:#a16207;">Get a free API key at '
+        '<p style="margin:4px 0 0;color:#a16207;">Free API key: '
         '<a href="https://ai.google.dev" target="_blank" style="color:#854d0e;font-weight:bold;">ai.google.dev</a></p>'
         '</div>',
         unsafe_allow_html=True
