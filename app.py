@@ -1273,7 +1273,55 @@ if gemini_key:
     try:
         import google.generativeai as genai
         genai.configure(api_key=gemini_key)
-        model = genai.GenerativeModel('gemini-2.5-flash-lite')
+        
+        def calculate_index_area_by_threshold(index_name: str, threshold: float, condition: str = 'less_than') -> str:
+            """Calculates the area in hectares within the current drawn study area where an index meets a threshold condition.
+            
+            Args:
+                index_name: The name of the index (e.g., 'NDVI', 'NDWI').
+                threshold: The numerical threshold value (e.g., 0.3).
+                condition: The condition to check ('less_than' or 'greater_than').
+            """
+            analysis_data = st.session_state.get('drawn_analysis', [])
+            if not analysis_data:
+                return "Error: No study area defined. Tell the user to draw a polygon on the map first."
+                
+            try:
+                geom_info = analysis_data[0]['geom_info']
+                geom = ee.Geometry(json.loads(geom_info))
+                
+                collection = get_s2_collection(geom, str(date_start), str(date_end), cloud_pct)
+                if collection.size().getInfo() == 0:
+                    return "Error: No Sentinel-2 images found for the selected dates."
+                    
+                composite = collection.median().clip(geom)
+                indices = compute_indices(composite)
+                img = indices[index_name]
+                
+                if condition == 'less_than':
+                    mask = img.lt(threshold)
+                elif condition == 'greater_than':
+                    mask = img.gt(threshold)
+                else:
+                    return f"Error: condition must be 'less_than' or 'greater_than', got '{condition}'"
+                    
+                area_img = ee.Image.pixelArea().updateMask(mask)
+                area_stats = area_img.reduceRegion(
+                    reducer=ee.Reducer.sum(),
+                    geometry=geom,
+                    scale=10,
+                    maxPixels=1e9
+                ).getInfo()
+                
+                area_sqm = list(area_stats.values())[0] if area_stats and len(area_stats) > 0 else 0
+                if area_sqm is None: area_sqm = 0
+                area_ha = area_sqm / 10000.0
+                
+                return f"SUCCESS: The area where {index_name} is {condition} {threshold} is {area_ha:.2f} hectares."
+            except Exception as e:
+                return f"Earth Engine Error: {str(e)}"
+                
+        model = genai.GenerativeModel('gemini-2.5-flash-lite', tools=[calculate_index_area_by_threshold])
 
         st.markdown(
             '<div style="background:linear-gradient(135deg,#eff6ff,#dbeafe);border:1px solid #93c5fd;'
@@ -1530,14 +1578,18 @@ if gemini_key:
                     analysis_context = build_analysis_context()
                     system_prompt = (
                         "You are a remote sensing expert in a Sentinel-2 analysis app. "
-                        "You can interpret data AND tell users to use these commands:\n"
+                        "You can interpret data AND you have tools to perform Earth Engine calculations! "
+                        "If the user asks about the Area matching a certain threshold (e.g. 'how much area is below NDVI 0.3', "
+                        "or 'area with water NDWI > 0.1'), you MUST use the calculate_index_area_by_threshold tool. "
+                        "Do not say you cannot calculate area. Use your tool! "
+                        "You can also tell users to use these commands:\n"
                         "- 'Compute NDVI for <lat>, <lon>' to run live analysis\n"
                         "- 'Show NDVI histogram' to generate distribution chart\n"
                         "- 'Show NDVI time series' for monthly trends\n"
                         "- 'Land cover classification' for NDVI-based land use\n"
                         "- 'Compare indices' for bar chart comparison\n\n"
                         "Current data:\n%s\n\n"
-                        "Answer the user's question. If they want analysis, suggest the right command.\n"
+                        "Answer the user's question.\n"
                     ) % analysis_context
 
                     chat_history = []
@@ -1549,7 +1601,8 @@ if gemini_key:
 
                     with st.spinner("Thinking..."):
                         try:
-                            chat = model.start_chat(history=chat_history)
+                            # Enable automatic function calling
+                            chat = model.start_chat(history=chat_history, enable_automatic_function_calling=True)
                             response = chat.send_message(system_prompt + "\nUser: " + user_prompt)
                             st.markdown(response.text)
                             st.session_state.chat_messages.append({
