@@ -360,12 +360,12 @@ def create_publication_map(geometry, index_name, start, end, cloud_max, title=No
     try:
         gd_image = geedim.MaskedImage(ee.Image(index_img))
         # Download a low-res version for the plot
-        with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp_tif:
-            gd_image.download(tmp_tif.name, region=region, scale=50, crs='EPSG:4326')
+        tmp_tif_path = tempfile.NamedTemporaryFile(suffix='.tif', delete=False).name
+        gd_image.download(tmp_tif_path, region=region, scale=50, crs='EPSG:4326', overwrite=True)
             
-            with rasterio.open(tmp_tif.name) as src:
-                data = src.read(1)
-                extent = [src.bounds.left, src.bounds.right, src.bounds.bottom, src.bounds.top]
+        with rasterio.open(tmp_tif_path) as src:
+            data = src.read(1)
+            extent = [src.bounds.left, src.bounds.right, src.bounds.bottom, src.bounds.top]
         
         fig = plt.figure(figsize=(10, 8))
         ax = plt.axes(projection=ccrs.PlateCarree())
@@ -405,8 +405,8 @@ def create_publication_map(geometry, index_name, start, end, cloud_max, title=No
         plt.close(fig)
         
         # Cleanup
-        if os.path.exists(tmp_tif.name):
-            os.remove(tmp_tif.name)
+        if os.path.exists(tmp_tif_path):
+            os.remove(tmp_tif_path)
             
         return buf.getvalue()
     except Exception as e:
@@ -427,14 +427,15 @@ def download_gee_tif(geometry, index_name, start, end, cloud_max):
         gd_image = geedim.MaskedImage(ee.Image(index_img))
         region = geometry.getInfo()
         
-        with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
-            # geedim handles tiling automatically if needed
-            gd_image.download(tmp.name, region=region, scale=10, crs='EPSG:4326')
-            with open(tmp.name, 'rb') as f:
-                data = f.read()
+        tmp_path = tempfile.NamedTemporaryFile(suffix='.tif', delete=False).name
         
-        if os.path.exists(tmp.name):
-            os.remove(tmp.name)
+        # geedim handles tiling automatically if needed
+        gd_image.download(tmp_path, region=region, scale=10, crs='EPSG:4326', overwrite=True)
+        with open(tmp_path, 'rb') as f:
+            data = f.read()
+        
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
         return data
     except Exception as e:
         st.error(f"Error downloading GeoTIFF: {e}")
