@@ -1012,7 +1012,7 @@ if gemini_key:
     try:
         import google.generativeai as genai
         genai.configure(api_key=gemini_key)
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash-lite')
 
         st.markdown(
             '<div style="background:linear-gradient(135deg,#eff6ff,#dbeafe);border:1px solid #93c5fd;'
@@ -1158,3 +1158,4 @@ else:
         '</div>',
         unsafe_allow_html=True
     )
+
