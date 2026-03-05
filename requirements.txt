@@ -6,3 +6,7 @@ fpdf2
 plotly
 numpy
 google-generativeai
+geedim
+rasterio
+matplotlib
+cartopy
